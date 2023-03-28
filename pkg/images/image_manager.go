@@ -119,6 +119,7 @@ type WorkQueueKey struct {
 }
 
 // NewImageManager returns a new image manager object
+// TODO ImageManager是如何管理镜像的？ 镜像又是如何被拉取的？ kubelet ImageGC会有什么影响
 func NewImageManager(
 	workqueue workqueue.RateLimitingInterface,
 	imageworkqueue workqueue.RateLimitingInterface,
@@ -136,6 +137,7 @@ func NewImageManager(
 	labelSelector := labels.NewSelector()
 	labelSelector = labelSelector.Add(*appEqKubefledged, *kubefledgedEqImagemanager)
 
+	// TODO 这里为啥又自己创建一个kubeInformerFactory?
 	kubeInformerFactory := kubeinformers.NewSharedInformerFactoryWithOptions(
 		kubeclientset,
 		time.Second*30,
@@ -165,6 +167,7 @@ func NewImageManager(
 	}
 	podInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		//AddFunc: ,
+		// TODO 为什么这里只关心Pod的更新事件？
 		UpdateFunc: func(old, new interface{}) {
 			newPod := new.(*corev1.Pod)
 			oldPod := old.(*corev1.Pod)
@@ -381,12 +384,15 @@ func (m *ImageManager) updateImageCacheStatus(imageCache *fledgedv1alpha2.ImageC
 func (m *ImageManager) Run(stopCh <-chan struct{}) error {
 	defer runtime.HandleCrash()
 	glog.Info("Starting image manager")
+	// 启动Informer
 	go m.kubeInformerFactory.Start(stopCh)
 	// Wait for the caches to be synced before starting workers
 	glog.Info("Waiting for informer caches to sync")
+	// TODO 外面判断了一遍，里面又判断一遍
 	if ok := cache.WaitForCacheSync(stopCh, m.podsSynced); !ok {
 		return fmt.Errorf("failed to wait for caches to sync")
 	}
+	// TODO 为啥这里需要调用runWorker?
 	go wait.Until(m.runWorker, time.Second, stopCh)
 	glog.Info("Started image manager")
 	<-stopCh
@@ -406,6 +412,7 @@ func (m *ImageManager) runWorker() {
 // attempt to process it, by calling the syncHandler.
 func (m *ImageManager) processNextWorkItem() bool {
 	//glog.Info("processNextWorkItem::Beginning...")
+	// 从队列中获取新的IamgeCache CR
 	obj, shutdown := m.imageworkqueue.Get()
 
 	if shutdown {

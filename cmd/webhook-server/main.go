@@ -36,6 +36,7 @@ func init() {
 	flag.BoolVar(&initServer, "init-server", false, "True means only init tasks for the server will be performed. Server is not started")
 }
 
+// TODO 主要为了校验提交的ImageCache CR
 func main() {
 	flag.Parse()
 	if initServer {

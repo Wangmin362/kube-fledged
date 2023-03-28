@@ -106,23 +106,29 @@ func NewController(
 	glog.V(4).Info("Creating event broadcaster")
 	eventBroadcaster := record.NewBroadcaster()
 	eventBroadcaster.StartLogging(glog.Infof)
+	// TODO 这个API是啥意思
 	eventBroadcaster.StartRecordingToSink(&typedcorev1.EventSinkImpl{Interface: kubeclientset.CoreV1().Events("")})
 	recorder := eventBroadcaster.NewRecorder(scheme.Scheme, corev1.EventSource{Component: controllerAgentName})
 
 	controller := &Controller{
-		kubeclientset:              kubeclientset,
-		kubefledgedclientset:       kubefledgedclientset,
-		fledgedNameSpace:           namespace,
-		nodesLister:                nodeInformer.Lister(),
-		nodesSynced:                nodeInformer.Informer().HasSynced,
-		imageCachesLister:          imageCacheInformer.Lister(),
-		imageCachesSynced:          imageCacheInformer.Informer().HasSynced,
-		workqueue:                  workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "ImageCaches"),
-		imageworkqueue:             workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "ImagePullerStatus"),
-		recorder:                   recorder,
+		kubeclientset:        kubeclientset,
+		kubefledgedclientset: kubefledgedclientset,
+		fledgedNameSpace:     namespace,
+		nodesLister:          nodeInformer.Lister(),
+		nodesSynced:          nodeInformer.Informer().HasSynced,
+		imageCachesLister:    imageCacheInformer.Lister(),
+		imageCachesSynced:    imageCacheInformer.Informer().HasSynced,
+		// ImageCache CR队列
+		workqueue: workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "ImageCaches"),
+		// 这玩意应该就是和镜像拉取相关的队列
+		imageworkqueue: workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "ImagePullerStatus"),
+		// 事件记录器
+		recorder: recorder,
+		// 镜像刷新频率
 		imageCacheRefreshFrequency: imageCacheRefreshFrequency,
 	}
 
+	// 初始化ImageManager
 	imageManager, _ := images.NewImageManager(controller.workqueue, controller.imageworkqueue,
 		controller.kubeclientset, controller.fledgedNameSpace, imagePullDeadlineDuration,
 		criClientImage, busyboxImage, imagePullPolicy, serviceAccountName, imageDeleteJobHostNetwork,
@@ -132,6 +138,7 @@ func NewController(
 	glog.Info("Setting up event handlers")
 	// Set up an event handler for when ImageCache resources change
 	imageCacheInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+		// ImageCache的增删改查
 		AddFunc: func(obj interface{}) {
 			controller.enqueueImageCache(images.ImageCacheCreate, nil, obj)
 		},
@@ -240,6 +247,7 @@ func (c *Controller) Run(threadiness int, stopCh <-chan struct{}) error {
 	glog.Info("Starting kubefledged-controller")
 
 	// Wait for the caches to be synced before starting workers
+	// 等待ImageCache CR同步完成
 	if ok := cache.WaitForCacheSync(stopCh, c.nodesSynced, c.imageCachesSynced); !ok {
 		return fmt.Errorf("failed to wait for caches to sync")
 	}
@@ -247,15 +255,18 @@ func (c *Controller) Run(threadiness int, stopCh <-chan struct{}) error {
 
 	// Launch workers to process ImageCache resources
 	for i := 0; i < threadiness; i++ {
+		// TODO 这里面干了啥？
 		go wait.Until(c.runWorker, time.Second, stopCh)
 	}
 	glog.Info("Image cache worker started")
 
 	if c.imageCacheRefreshFrequency.Nanoseconds() != int64(0) {
+		// TODO 这里面干了啥？
 		go wait.Until(c.runRefreshWorker, c.imageCacheRefreshFrequency, stopCh)
 		glog.Info("Image cache refresh worker started")
 	}
 
+	// TODO 这TMD写两遍是啥意思？
 	c.imageManager.Run(stopCh)
 	if err := c.imageManager.Run(stopCh); err != nil {
 		glog.Fatalf("Error running image manager: %s", err.Error())

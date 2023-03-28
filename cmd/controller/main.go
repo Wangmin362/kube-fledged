@@ -63,6 +63,7 @@ func main() {
 		glog.Fatalf("Error building kubeconfig: %s", err.Error())
 	}
 
+	// TODO kubernetes.NewForConfig创建的client和clientset.NewForConfig创建的client有何区别？
 	kubeClient, err := kubernetes.NewForConfig(cfg)
 	if err != nil {
 		glog.Fatalf("Error building kubernetes clientset: %s", err.Error())
@@ -77,6 +78,7 @@ func main() {
 	fledgedInformerFactory := informers.NewSharedInformerFactory(fledgedClient, time.Second*30)
 
 	controller := app.NewController(kubeClient, fledgedClient, fledgedNameSpace,
+		// 监听Node，如果有新的Node加入，那么肯定需要在新结点上拉取需要的镜像
 		kubeInformerFactory.Core().V1().Nodes(),
 		fledgedInformerFactory.Kubefledged().V1alpha2().ImageCaches(),
 		imageCacheRefreshFrequency, imagePullDeadlineDuration, criClientImage,
@@ -89,6 +91,7 @@ func main() {
 	}
 	glog.Info("Pre-flight checks completed")
 
+	// 通过InformerFactory启动一个个的Informer
 	go kubeInformerFactory.Start(stopCh)
 	go fledgedInformerFactory.Start(stopCh)
 
