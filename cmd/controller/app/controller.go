@@ -412,6 +412,7 @@ func (c *Controller) processNextWorkItem() bool {
 // runRefreshWorker is resposible of refreshing the image cache
 func (c *Controller) runRefreshWorker() {
 	// List the ImageCache resources
+	// 找到所有的ImageCache CR
 	imageCaches, err := c.imageCachesLister.ImageCaches("").List(labels.Everything())
 	if err != nil {
 		glog.Errorf("Error in listing image caches: %v", err)
@@ -462,6 +463,7 @@ func (c *Controller) syncHandler(wqKey images.WorkQueueKey) error {
 		startTime := metav1.Now()
 		status.StartTime = &startTime
 		// Get the ImageCache resource with this namespace/name
+		// 根据name通过ImageCacheInformer查询ImageCache
 		imageCache, err := c.imageCachesLister.ImageCaches(namespace).Get(name)
 		if err != nil {
 			// The ImageCache resource may no longer exist, in which case we stop
