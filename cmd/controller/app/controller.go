@@ -119,8 +119,10 @@ func NewController(
 		imageCachesLister:    imageCacheInformer.Lister(),
 		imageCachesSynced:    imageCacheInformer.Informer().HasSynced,
 		// ImageCache CR队列
+		// TODO workqueue的生产者和消费者是谁  workqueue的生产者有两个地方：一个是Informer的监听，也就是用户提交CR；另外一个就是重新刷新的任务
 		workqueue: workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "ImageCaches"),
-		// 这玩意应该就是和镜像拉取相关的队列
+		// imageworkqueue中保存的是具体每一个镜像的下载任务，即imageworkequeue是workqueue的任务分解
+		// TODO imageworkqueue的生产者消费者是谁？ 显然imageworkqueue的生产者一定是处理workqueue中的消费者
 		imageworkqueue: workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "ImagePullerStatus"),
 		// 事件记录器
 		recorder: recorder,
@@ -137,6 +139,7 @@ func NewController(
 
 	glog.Info("Setting up event handlers")
 	// Set up an event handler for when ImageCache resources change
+	// 监听ImageCache CR的变化
 	imageCacheInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		// ImageCache的增删改查
 		AddFunc: func(obj interface{}) {
@@ -255,13 +258,16 @@ func (c *Controller) Run(threadiness int, stopCh <-chan struct{}) error {
 
 	// Launch workers to process ImageCache resources
 	for i := 0; i < threadiness; i++ {
-		// TODO 这里面干了啥？
+		// 处理workqueue中的元素，取出来一个一个的处理
+		// 这里是workqueue的消费者
 		go wait.Until(c.runWorker, time.Second, stopCh)
 	}
 	glog.Info("Image cache worker started")
 
+	// 默认每15分钟重新刷新一次
 	if c.imageCacheRefreshFrequency.Nanoseconds() != int64(0) {
-		// TODO 这里面干了啥？
+		// 通过List接口查询K8S集群中所有的ImageCache CR,并且把所有需要下载的ImageCache放入到workqueue中
+		// 这里是workQueue的生产者
 		go wait.Until(c.runRefreshWorker, c.imageCacheRefreshFrequency, stopCh)
 		glog.Info("Image cache refresh worker started")
 	}
@@ -341,6 +347,7 @@ func (c *Controller) enqueueImageCache(workType images.WorkType, old, new interf
 		wqKey.OldImageCache = oldImageCache
 	}
 
+	// 镜像的下载任务放到workQueue中
 	c.workqueue.AddRateLimited(wqKey)
 	glog.V(4).Infof("enqueueImageCache::ImageCache resource queued for work type %s", workType)
 	return true
@@ -412,13 +419,13 @@ func (c *Controller) processNextWorkItem() bool {
 // runRefreshWorker is resposible of refreshing the image cache
 func (c *Controller) runRefreshWorker() {
 	// List the ImageCache resources
-	// 找到所有的ImageCache CR
+	// 找到所有的ImageCache CR，即拿到所有需要同步的镜像
 	imageCaches, err := c.imageCachesLister.ImageCaches("").List(labels.Everything())
 	if err != nil {
 		glog.Errorf("Error in listing image caches: %v", err)
 		return
 	}
-	for i := range imageCaches {
+	for i := range imageCaches { // 遍历一个个CR
 		// Do not refresh if status is not yet updated
 		if reflect.DeepEqual(imageCaches[i].Status, v1alpha2.ImageCacheStatus{}) {
 			continue
@@ -449,6 +456,7 @@ func (c *Controller) syncHandler(wqKey images.WorkQueueKey) error {
 	}
 
 	// Convert the namespace/name string into a distinct namespace and name
+	// ImageCache CR的namespace以及name
 	namespace, name, err := cache.SplitMetaNamespaceKey(wqKey.ObjKey)
 	if err != nil {
 		glog.Errorf("Error from cache.SplitMetaNamespaceKey(): %v", err)
@@ -511,6 +519,7 @@ func (c *Controller) syncHandler(wqKey images.WorkQueueKey) error {
 			status.Message = v1alpha2.ImageCacheMessagePurgeCache
 		}
 
+		// TODO 这是在干嘛？
 		imageCache, err = c.kubefledgedclientset.KubefledgedV1alpha2().ImageCaches(namespace).Get(context.TODO(), name, metav1.GetOptions{})
 		if err != nil {
 			glog.Errorf("Error getting imagecache(%s) from api server: %v", name, err)

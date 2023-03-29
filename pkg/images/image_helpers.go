@@ -262,16 +262,20 @@ func newImageDeleteJob(imagecache *fledgedv1alpha2.ImageCache, image string, nod
 func checkIfImageNeedsToBePulled(imagePullPolicy string, image string, node *corev1.Node) (bool, error) {
 	if imagePullPolicy == string(corev1.PullIfNotPresent) {
 		if !strings.Contains(image, ":") && !strings.Contains(image, "@sha") {
+			// 如果没有指定镜像的具体版本，默认只能拉取此镜像的latest版本
 			return true, nil
 		}
 		if strings.Contains(image, ":latest") {
+			// 如果镜像的TAG为latest，那么只能重新拉取镜像，因为本地的latest镜像可能已经不是最新的，此时需要重新拉取镜像
 			return true, nil
 		}
+		// 判断当前节点是否存在该镜像
 		imageAlreadyPresent, err := imageAlreadyPresentInNode(image, node)
 		if err != nil {
 			return false, err
 		}
 		if imageAlreadyPresent {
+			// 如果已经存在该镜像了，那么不需要重新
 			return false, nil
 		}
 	}
@@ -279,6 +283,10 @@ func checkIfImageNeedsToBePulled(imagePullPolicy string, image string, node *cor
 }
 
 func imageAlreadyPresentInNode(image string, node *corev1.Node) (bool, error) {
+	// 直接从Node的状态当中获取当前Node的镜像
+	// TODO 如果该节点已经有了该镜像，但是重来都没有通过这个镜像启动任何的Pod，镜像的信息会存在Node.status当中么？
+	// 答：经过测试，Node.Status.Images中的镜像信息一定是当前节点上启动过K8S Pod的镜像信息，手动在节点上拉取下来的镜像并不会出现
+	// 但是在这里不会有bug，因为kube-fledged是通过Job拉取镜像，因此Node.Status.Image一定会出现已经拉去过的镜像信息
 	imagesByteSlice, err := json.Marshal(node.Status.Images)
 	if err != nil {
 		return false, err

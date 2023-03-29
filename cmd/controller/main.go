@@ -63,7 +63,7 @@ func main() {
 		glog.Fatalf("Error building kubeconfig: %s", err.Error())
 	}
 
-	// TODO kubernetes.NewForConfig创建的client和clientset.NewForConfig创建的client有何区别？
+	// 实例化clientset
 	kubeClient, err := kubernetes.NewForConfig(cfg)
 	if err != nil {
 		glog.Fatalf("Error building kubernetes clientset: %s", err.Error())

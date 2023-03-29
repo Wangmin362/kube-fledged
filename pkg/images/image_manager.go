@@ -60,27 +60,30 @@ const (
 
 // ImageManager provides the functionalities for pulling and deleting images
 type ImageManager struct {
-	fledgedNameSpace          string
-	workqueue                 workqueue.RateLimitingInterface
-	imageworkqueue            workqueue.RateLimitingInterface
-	kubeclientset             kubernetes.Interface
-	imageworkstatus           map[string]ImageWorkResult
-	kubeInformerFactory       kubeinformers.SharedInformerFactory
+	fledgedNameSpace string
+	workqueue        workqueue.RateLimitingInterface
+	imageworkqueue   workqueue.RateLimitingInterface
+	kubeclientset    kubernetes.Interface
+	// TODO 每个镜像的拉取结果，key为image名字？
+	imageworkstatus     map[string]ImageWorkResult
+	kubeInformerFactory kubeinformers.SharedInformerFactory
+	// TODO 为什么需要监听Pod？
 	podsLister                corelisters.PodLister
 	podsSynced                cache.InformerSynced
 	imagePullDeadlineDuration time.Duration
 	criClientImage            string
 	busyboxImage              string
-	imagePullPolicy           string
-	serviceAccountName        string
+	imagePullPolicy           string // 镜像拉取策略
+	serviceAccountName        string // 由于需要通过启动JOB的方式拉取镜像，因此这里给的SA必须有权限操作JOB的API
 	imageDeleteJobHostNetwork bool
 	jobPriorityClassName      string
 	canDeleteJob              bool
-	criSocketPath             string
+	criSocketPath             string // 可以是 docker.sock, contaienrd.sock, crio.sock
 	lock                      sync.RWMutex
 }
 
 // ImageWorkRequest has image name, node name, work type and imagecache
+// imageworkqueue中保存的就是这个玩意
 type ImageWorkRequest struct {
 	Image                   string
 	Node                    *corev1.Node
@@ -384,7 +387,7 @@ func (m *ImageManager) updateImageCacheStatus(imageCache *fledgedv1alpha2.ImageC
 func (m *ImageManager) Run(stopCh <-chan struct{}) error {
 	defer runtime.HandleCrash()
 	glog.Info("Starting image manager")
-	// 启动Informer
+	// 启动Informer，缓存ImageCache CR
 	go m.kubeInformerFactory.Start(stopCh)
 	// Wait for the caches to be synced before starting workers
 	glog.Info("Waiting for informer caches to sync")
@@ -392,7 +395,7 @@ func (m *ImageManager) Run(stopCh <-chan struct{}) error {
 	if ok := cache.WaitForCacheSync(stopCh, m.podsSynced); !ok {
 		return fmt.Errorf("failed to wait for caches to sync")
 	}
-	// TODO 为啥这里需要调用runWorker?
+	// 消费imageworkqueue
 	go wait.Until(m.runWorker, time.Second, stopCh)
 	glog.Info("Started image manager")
 	<-stopCh
@@ -412,7 +415,6 @@ func (m *ImageManager) runWorker() {
 // attempt to process it, by calling the syncHandler.
 func (m *ImageManager) processNextWorkItem() bool {
 	//glog.Info("processNextWorkItem::Beginning...")
-	// 从队列中获取新的IamgeCache CR
 	obj, shutdown := m.imageworkqueue.Get()
 
 	if shutdown {
@@ -459,6 +461,7 @@ func (m *ImageManager) processNextWorkItem() bool {
 		var pull, delete bool
 		if iwr.WorkType == ImageCachePurge {
 			delete = true
+			// 删除镜像的逻辑很简单，启动一个JOB容器，这个JOB容器通过挂载cri的sock文件，譬如docker.sock，然后执行docker rm命令即可删除镜像
 			job, err = m.deleteImage(iwr)
 			if err != nil {
 				return fmt.Errorf("error deleting image '%s' from node '%s': %s", iwr.Image, iwr.Node.Labels["kubernetes.io/hostname"], err.Error())
@@ -466,12 +469,19 @@ func (m *ImageManager) processNextWorkItem() bool {
 			glog.Infof("Job %s created (delete:- %s --> %s, runtime: %s)", job.Name, iwr.Image, iwr.Node.Labels["kubernetes.io/hostname"], iwr.ContainerRuntimeVersion)
 		} else {
 			pull = true
+			// TODO 这一步非常关键，镜像的拉取实际上非常占用CPU资源，所以判断是否需要重新拉取镜像应该相当谨慎才对
+			// 1、如果镜像的拉取策略不是IfNotPresent，那么需要重新拉取镜像
+			// 2、如果镜像的拉取策略为IfNotPresent，那么需要判断如下逻辑：
+			// 		2.1、如果镜像是latest的Tag，那么重新拉取镜像
+			// 		2.2、如果镜像没有任何Tag，或者镜像的哈希（以@sha结尾的字符串），当作latest处理，此时需要重新拉取镜像
+			// 		2.3、如果镜像已经在Node上存在了，那么不需要拉取镜像
 			pull, err = checkIfImageNeedsToBePulled(m.imagePullPolicy, iwr.Image, iwr.Node)
 			if err != nil {
 				glog.Errorf("Error from checkIfImageNeedsToBePulled(): %+v", err)
 				return fmt.Errorf("error from checkIfImageNeedsToBePulled(): %+v", err)
 			}
 			if pull {
+				// 拉取镜像非常简单，实际上就是起了一个Job，启动了对应的镜像
 				job, err = m.pullImage(iwr)
 				if err != nil {
 					return fmt.Errorf("error pulling image '%s' to node '%s': %s", iwr.Image, iwr.Node.Labels["kubernetes.io/hostname"], err.Error())
@@ -485,9 +495,11 @@ func (m *ImageManager) processNextWorkItem() bool {
 		// get queued again until another change happens.
 		m.lock.Lock()
 		if pull || delete {
+			// 更新任务状态
 			m.imageworkstatus[job.Name] = ImageWorkResult{ImageWorkRequest: iwr, Status: ImageWorkResultStatusJobCreated}
 		} else {
 			// generate a random fake job name
+			// 没有Job运行，所以只能生成一个假名字
 			m.imageworkstatus[names.SimpleNameGenerator.GenerateName(fakeJobPrefix)] = ImageWorkResult{ImageWorkRequest: iwr, Status: ImageWorkResultStatusAlreadyPulled}
 		}
 		m.lock.Unlock()
@@ -524,6 +536,7 @@ func (m *ImageManager) pullImage(iwr ImageWorkRequest) (*batchv1.Job, error) {
 // deleteImage deletes the image from the node
 func (m *ImageManager) deleteImage(iwr ImageWorkRequest) (*batchv1.Job, error) {
 	// Construct the Job manifest
+	// 删除镜像的逻辑其实非常简单，实际上就是通过docker rm命令完成的镜像删除
 	newjob, err := newImageDeleteJob(iwr.Imagecache, iwr.Image, iwr.Node, iwr.ContainerRuntimeVersion,
 		m.criClientImage, m.serviceAccountName, m.imageDeleteJobHostNetwork, m.jobPriorityClassName, m.criSocketPath)
 	if err != nil {
